@@ -1,39 +1,61 @@
+import pandas
 import pandas as pd
 from otlang.sdk.syntax import Keyword, Positional, OTLType
 from pp_exec_env.base_command import BaseCommand, Syntax
+
+from streamstats.aggregations import generate
 
 
 class StreamstatsCommand(BaseCommand):
     # define syntax of your command here
     syntax = Syntax(
         [
-            Positional("first_positional_string_argument", required=True, otl_type=OTLType.TEXT),
-            Keyword("kwarg_int_argument", required=False, otl_type=OTLType.INTEGER),
-            Keyword("kwarg_int_double_argument", required=False, otl_type=OTLType.NUMBERIC),
-            Keyword("some_kwargs", otl_type=OTLType.ALL, inf=True),
+            Keyword("window", required=False, otl_type=OTLType.NUMERIC),
+            Keyword("time_window", required=False, otl_type=OTLType.NUMERIC),
+            Positional("aggregation_name", required=False, otl_type=OTLType.FUNCTION, inf=True)
         ],
     )
     use_timewindow = False  # Does not require time window arguments
     idempotent = True  # Does not invalidate cache
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        self.log_progress('Start streamstats command')
+        # self.log_progress('Start streamstats command')
         # that is how you get arguments
-        first_positional_string_argument = self.get_arg("first_positional_string_argument").value
-        kwarg_int_argument = self.get_arg("kwarg_int_argument").value or 5
-        some_kwargs = {k.key: k.value for k in self.get_iter("some_kwargs")}
+        window = self.get_arg("window").value
+        time_window = self.get_arg("time_window").value
+
+        if window and time_window:
+            self.log_progress('Warning: you use window and time_window arguments, time_window only will be used.')
+
+        # check if dataframe has a _time column
+        if '_time' not in df:
+            raise ValueError(f'Dataframe must have _time column.')
+
+        # check if dataframe is sorted by _time column
+        if not (df['_time'].is_monotonic_increasing or df['_time'].is_monotonic_decreasing):
+            self.log_progress('Dataframe was not sorted, sorting...')
+            df = df.sort_values(by='_time', inplace=True)
+
+        window = window if time_window is None else f'{time_window}s'
+
+        # get all the aggregations
+        aggregation_names = [x for x in self.get_iter("aggregation_name")]
 
         # Make your logic here
-        df = pd.DataFrame([[1, 2, 3], [2, 3, 4]], columns=["a", "b", "c"])
+        # go through each command
+        result_list = []
+        for aggregation in aggregation_names:
+            params = dict()
+            agg_name = aggregation.value['funcname']['value']
+            params['args'] = [x['value'] for x in aggregation.value['funcargs']]
+            named_as = agg_name if aggregation.value.get('named_as') is None else aggregation.value['named_as']['value']
+            params['grouped_by'] = [x['value'] for x in aggregation.value['grouped_by']]
+            temp = generate(dataframe=df, name=agg_name, named_as=named_as, window=window, **params)
+            result_list.append(temp)
 
-        # Add description of what going on for log progress
-        self.log_progress('First part is complete.', stage=1, total_stages=2)
-        #
-        self.log_progress('Last transformation is complete', stage=2, total_stages=2)
+        if len(result_list) > 1:
+            result = pandas.concat(result_list, axis=1)
+        else:
+            result = result_list[0]
 
-        # Use ordinary logger if you need
-
-        self.logger.debug(f'Command streamstats get first positional argument = {first_positional_string_argument}')
-        self.logger.debug(f'Command streamstats get keyword argument = {kwarg_int_argument}')
-
-        return df
+        return result
